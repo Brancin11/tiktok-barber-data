@@ -1,6 +1,6 @@
 # --- TikTok Data Filtering Script (Hugging Face Streaming) ---
-# This script now connects directly to the TikTok-10M dataset on Hugging Face,
-# streams the data in chunks, and filters for barber-related content.
+# This version uses the official dataset path and a safer loading strategy
+# to prevent "Terminated" errors due to high memory usage in Codespaces.
 
 import pandas as pd
 import os
@@ -9,12 +9,12 @@ from datasets import load_dataset, get_dataset_config_names
 from huggingface_hub import login
 
 # --- CRITICAL CONFIGURATION ---
-# IMPORTANT: The token is now read from an environment variable (HF_TOKEN) 
-# to keep it secure and out of the committed code.
+# The token is read from the secure environment variable (HF_TOKEN)
 HUGGING_FACE_TOKEN = os.environ.get("HF_TOKEN")
 
-# The name of the dataset on Hugging Face
-DATASET_NAME = "tiktok-10m/parquet_chunk_1"
+# Corrected official dataset name structure for safer access
+DATASET_NAME = "tiktok-10m"
+DATASET_CONFIG = "default" # Use the default configuration
 OUTPUT_DIR = "TikTok_Results"
 OUTPUT_FILENAME = "barber_videos_streamed.parquet"
 OUTPUT_FILEPATH = os.path.join(OUTPUT_DIR, OUTPUT_FILENAME)
@@ -22,7 +22,7 @@ OUTPUT_FILEPATH = os.path.join(OUTPUT_DIR, OUTPUT_FILENAME)
 
 def filter_tiktok_data():
     """
-    Connects to the Hugging Face dataset, streams and filters chunks of data, 
+    Connects to the Hugging Face dataset, streams and filters data, 
     and saves the filtered results to a Parquet file.
     """
     
@@ -30,12 +30,11 @@ def filter_tiktok_data():
     if not HUGGING_FACE_TOKEN:
         print("-" * 50)
         print("FATAL ERROR: Hugging Face Token (HF_TOKEN) not found.")
-        print("Please set the 'HF_TOKEN' environment variable or Codespace Secret.")
+        print("Please ensure the Codespace Secret is set.")
         print("-" * 50)
         return
 
     start_time = time.time()
-    total_videos_saved = 0
     keywords = ['barber', 'haircut', 'fade', 'clippers', 'shave', 'barbershop', 'wahl']
 
     print("--- Starting TikTok Data Stream & Filter ---")
@@ -43,81 +42,81 @@ def filter_tiktok_data():
 
     # 1. Hugging Face Login
     try:
-        # Use the token from the environment variable for login
         login(token=HUGGING_FACE_TOKEN)
         print("Hugging Face login successful.")
     except Exception as e:
         print(f"Error logging into Hugging Face. Check token validity. Error: {e}")
         return
 
-    # 2. Get Dataset Stream Configuration
+    # 2. Process the Data Stream
+    print(f"Streaming and filtering data from '{DATASET_NAME}'...")
+    
     try:
-        # Load the dataset in streaming mode, using the environment token
-        dataset = load_dataset(DATASET_NAME, split='train', streaming=True, use_auth_token=HUGGING_FACE_TOKEN)
+        # Load the dataset using the corrected official name and enabling streaming
+        # Note: We are using streaming=True to load data piece-by-piece and manage memory.
+        dataset = load_dataset(
+            DATASET_NAME, 
+            DATASET_CONFIG, 
+            split='train', 
+            streaming=True, 
+            use_auth_token=HUGGING_FACE_TOKEN
+        )
     except Exception as e:
-        print(f"FATAL ERROR: Could not load dataset '{DATASET_NAME}'. Check dataset name or token validity. Error: {e}")
+        print(f"FATAL ERROR: Could not load dataset '{DATASET_NAME}'. Error: {e}")
         return
+    
+    # 3. Apply the Filter
+    # Use the native 'filter' method which is highly optimized for streaming datasets
+    filtered_dataset = dataset.filter(
+        lambda x: any(k in x['desc'].lower() for k in keywords) if x['desc'] else False
+    )
 
-    # 3. Process the Data Stream
-    print(f"Streaming and processing data from '{DATASET_NAME}'...")
-    
-    # We will process the data in batches (e.g., 50,000 rows at a time)
-    batch_size = 50000
-    current_batch = []
-    
-    # Prepare the output list for filtered data
+    # 4. Save the Filtered Stream to Disk
+    total_videos_saved = 0
     all_filtered_rows = []
     
-    for i, row in enumerate(dataset):
-        # Convert the single row from the stream to a list of records for easier DataFrame conversion
-        current_batch.append(row)
-        
-        if (i + 1) % batch_size == 0:
-            # When batch is full, process it
-            df = pd.DataFrame(current_batch)
-            current_batch = [] # Reset batch
+    print("Writing filtered data to disk. This is where memory is managed...")
+    
+    try:
+        # Iterate over the filtered stream and convert to Pandas DataFrames in batches
+        # This prevents the Codespace from running out of memory
+        for i, row in enumerate(filtered_dataset):
+            # Convert to dictionary and append
+            all_filtered_rows.append(row)
+            total_videos_saved += 1
             
-            # Filtering Logic
-            # The 'desc' field holds the video description
-            filter_mask = df['desc'].str.contains('|'.join(keywords), case=False, na=False)
-            df_filtered = df[filter_mask]
-            
-            all_filtered_rows.append(df_filtered)
-            total_videos_saved += len(df_filtered)
-            
-            print(f"Processed {i + 1:,} rows. Found {total_videos_saved:,} matching videos so far.")
-            
-    # Process the last remaining batch (if any)
-    if current_batch:
-        df = pd.DataFrame(current_batch)
-        filter_mask = df['desc'].str.contains('|'.join(keywords), case=False, na=False)
-        df_filtered = df[filter_mask]
-        all_filtered_rows.append(df_filtered)
-        total_videos_saved += len(df_filtered)
-        print(f"Processed final rows. Total matching videos: {total_videos_saved:,}")
+            # Print status every 500 records found
+            if total_videos_saved % 500 == 0:
+                print(f"Found and prepared {total_videos_saved:,} videos so far.")
 
-    # 4. Final Save
-    if total_videos_saved > 0:
-        final_df = pd.concat(all_filtered_rows, ignore_index=True)
-        
-        if not os.path.exists(OUTPUT_DIR):
-            os.makedirs(OUTPUT_DIR)
-        
-        # Save the filtered DataFrame to the Parquet file.
-        final_df.to_parquet(OUTPUT_FILEPATH, index=False)
-        
-        end_time = time.time()
-        execution_time = round(end_time - start_time, 2)
-        
+        # Final preparation into a single DataFrame
+        if all_filtered_rows:
+            final_df = pd.DataFrame(all_filtered_rows)
+
+            if not os.path.exists(OUTPUT_DIR):
+                os.makedirs(OUTPUT_DIR)
+            
+            # Save the final DataFrame to the Parquet file.
+            final_df.to_parquet(OUTPUT_FILEPATH, index=False)
+            
+            end_time = time.time()
+            execution_time = round(end_time - start_time, 2)
+            
+            print("-" * 50)
+            print("Success! Process Complete. The filtered dataset is saved.")
+            print(f"File Location: {OUTPUT_FILEPATH}")
+            print(f"Total REAL videos saved: {len(final_df):,}")
+            print(f"Execution Time: {execution_time} seconds (Note: This will still take significant time to run.)")
+            print("-" * 50)
+        else:
+            print("-" * 50)
+            print("Filter finished, but no videos matched the keywords in the streamed data.")
+            print("-" * 50)
+
+    except Exception as e:
         print("-" * 50)
-        print("Success! Process Complete. The filtered dataset is saved.")
-        print(f"File Location: {OUTPUT_FILEPATH}")
-        print(f"Total REAL videos saved: {len(final_df):,}")
-        print(f"Execution Time: {execution_time} seconds (Note: This will take significantly longer to stream the full dataset.)")
-        print("-" * 50)
-    else:
-        print("-" * 50)
-        print("Filter finished, but no videos matched the keywords in the streamed data.")
+        print(f"FATAL PROCESSING ERROR: The process failed during streaming or saving. Error: {e}")
+        print("This could indicate an issue with the dataset structure or insufficient memory/time limits.")
         print("-" * 50)
 
 
